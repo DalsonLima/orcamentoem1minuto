@@ -52,7 +52,7 @@ body{
 button{font-family:inherit}
 
 /* ---------- estrutura ---------- */
-.app{max-width:600px;margin:0 auto;min-height:100vh;position:relative}
+.app{max-width:600px;margin:0 auto;min-height:100vh;min-height:100dvh;position:relative}
 .tela{padding:0 16px calc(var(--nav) + env(safe-area-inset-bottom) + 28px)}
 .tela.oculto{display:none}
 
@@ -848,7 +848,6 @@ async function desenhar(){
   const r = dados.rascunho;
   const cor = n.cor || "#0E7A5F";
   const larg = L - PAD*2;
-  const ALT_FOTO = 300;
   // Só reserva espaço na imagem se a foto realmente carregar — assim uma
   // foto corrompida/apagada não deixa um buraco em branco no orçamento.
   const imgFoto = r.fotoId ? await carregarImagemFoto(r.fotoId) : null;
@@ -856,6 +855,9 @@ async function desenhar(){
     if(imgFoto && imgFoto._url) URL.revokeObjectURL(imgFoto._url);
     return c;
   }
+  // Altura do box da foto segue a proporção real da imagem (dentro de um
+  // limite razoável) — assim ela sempre aparece inteira, sem cortar topo/rodapé.
+  const ALT_FOTO = imgFoto ? Math.round(Math.min(480, Math.max(220, larg*(imgFoto.height/imgFoto.width)))) : 0;
 
   const med = document.createElement("canvas").getContext("2d");
 
@@ -949,7 +951,7 @@ async function desenhar(){
     x.beginPath();
     if(x.roundRect) x.roundRect(bx,by,bw,bh,16); else x.rect(bx,by,bw,bh);
     x.clip();
-    const escala = Math.max(bw/imgFoto.width, bh/imgFoto.height);
+    const escala = Math.min(bw/imgFoto.width, bh/imgFoto.height);
     const iw = imgFoto.width*escala, ih = imgFoto.height*escala;
     x.drawImage(imgFoto, bx+(bw-iw)/2, by+(bh-ih)/2, iw, ih);
     x.restore();
