@@ -110,6 +110,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
 .b:active{transform:translateY(1px)}
 .b svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .b-mini{width:auto;padding:8px 12px;min-height:38px;font-size:13px;border-radius:var(--r1)}
+.ref-preview{position:relative;display:inline-block;margin-top:12px}
+.ref-preview img{display:block;width:140px;height:140px;object-fit:cover;border-radius:var(--r2);border:1px solid var(--traco)}
+.ref-x{position:absolute;top:-8px;right:-8px;width:26px;height:26px;border-radius:50%;background:var(--perigo);color:#fff;border:2px solid var(--superficie);font-size:13px;line-height:1;cursor:pointer}
+.armaz-linha{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .ic{appearance:none;border:0;background:var(--folha);color:var(--tinta-2);cursor:pointer;width:38px;height:38px;border-radius:10px;flex:none;display:grid;place-items:center;font-size:18px;line-height:1}
 .ic svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
@@ -295,6 +299,17 @@ input[type=color]::-webkit-color-swatch{border:none;border-radius:50%}
   </div>
 
   <div class="bloco">
+    <div class="bloco-t"><h2>Referência do cliente <span class="micro" style="text-transform:none;letter-spacing:0;font-weight:500">(opcional)</span></h2></div>
+    <input type="file" id="o-foto" accept="image/*" class="oculto">
+    <button class="b b-2 b-mini" id="btn-foto" type="button">Adicionar foto</button>
+    <div class="ref-preview oculto" id="ref-preview">
+      <img id="ref-img" alt="Foto de referência do cliente">
+      <button class="ref-x" id="ref-remover" type="button" aria-label="Remover foto">✕</button>
+    </div>
+    <p class="aj">Ex: uma foto que o cliente mandou como referência ("quero um bolo assim"). Ela aparece no orçamento.</p>
+  </div>
+
+  <div class="bloco">
     <div class="bloco-t"><h2>Ajustes</h2></div>
     <div class="dois">
       <label class="campo"><span>Entrega (R$)</span><input type="text" inputmode="decimal" class="n" id="o-entrega" placeholder="0,00"></label>
@@ -365,6 +380,12 @@ input[type=color]::-webkit-color-swatch{border:none;border-radius:50%}
       <div><span>Valor fechado</span><strong id="h-val">R$ 0</strong></div>
     </div>
     <p class="aj" id="h-taxa"></p>
+  </div>
+  <div class="bloco oculto" id="bloco-armaz">
+    <div class="armaz-linha">
+      <p class="aj" id="armaz-texto" style="margin:0"></p>
+      <button class="b b-2 b-mini oculto" id="armaz-liberar" type="button">Liberar espaço</button>
+    </div>
   </div>
   <div class="bloco"><div id="lista-historico"></div></div>
 </section>
@@ -569,6 +590,106 @@ function carregar(){
 function salvar(){ try{ localStorage.setItem(CHAVE,JSON.stringify(dados)); }catch(e){} }
 const acharCat = id => dados.catalogo.find(c=>c.id===id);
 
+/* ================= fotos de referencia (IndexedDB) =================
+   localStorage é só pra texto (catálogo, orçamentos, config) e tem
+   limite baixo (uns 5-10MB no total). Foto em base64 encheria isso
+   rápido, então as fotos ficam à parte, no IndexedDB, que aguenta
+   bem mais espaço. */
+const DB_NOME = "orc1min-fotos", DB_VERSAO = 1, LOJA_FOTOS = "fotos";
+function abrirDB(){
+  return new Promise((res,rej)=>{
+    if(!window.indexedDB){ rej(new Error("sem IndexedDB")); return; }
+    const req = indexedDB.open(DB_NOME, DB_VERSAO);
+    req.onupgradeneeded = () => { if(!req.result.objectStoreNames.contains(LOJA_FOTOS)) req.result.createObjectStore(LOJA_FOTOS); };
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+async function salvarFoto(id, blob){
+  const db = await abrirDB();
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(LOJA_FOTOS,"readwrite");
+    tx.objectStore(LOJA_FOTOS).put(blob, id);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function lerFoto(id){
+  if(!id) return null;
+  try{
+    const db = await abrirDB();
+    return await new Promise((res,rej)=>{
+      const tx = db.transaction(LOJA_FOTOS,"readonly");
+      const req = tx.objectStore(LOJA_FOTOS).get(id);
+      req.onsuccess = () => res(req.result || null);
+      req.onerror = () => rej(req.error);
+    });
+  }catch(e){ return null; }
+}
+async function apagarFoto(id){
+  if(!id) return;
+  try{
+    const db = await abrirDB();
+    await new Promise((res,rej)=>{
+      const tx = db.transaction(LOJA_FOTOS,"readwrite");
+      tx.objectStore(LOJA_FOTOS).delete(id);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }catch(e){}
+}
+// Reduz a foto antes de guardar (redimensiona + comprime) pra cada
+// orçamento não pesar mais do que precisa.
+function comprimirImagem(file, maxLado, qualidade){
+  maxLado = maxLado || 1000; qualidade = qualidade || 0.82;
+  return new Promise((res,rej)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if(w>maxLado || h>maxLado){
+        const esc = maxLado/Math.max(w,h);
+        w = Math.round(w*esc); h = Math.round(h*esc);
+      }
+      const cv = document.createElement("canvas");
+      cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img,0,0,w,h);
+      cv.toBlob(blob=>{
+        URL.revokeObjectURL(url);
+        blob ? res(blob) : rej(new Error("falha ao comprimir"));
+      }, "image/jpeg", qualidade);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("imagem inválida")); };
+    img.src = url;
+  });
+}
+// Carrega a foto do IndexedDB pronta pra desenhar no canvas.
+// Quem chama é responsável por revogar imgEl._url depois de usar.
+async function carregarImagemFoto(id){
+  const blob = await lerFoto(id);
+  if(!blob) return null;
+  const url = URL.createObjectURL(blob);
+  try{
+    const img = await new Promise((res,rej)=>{
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error("foto corrompida"));
+      im.src = url;
+    });
+    img._url = url;
+    return img;
+  }catch(e){ URL.revokeObjectURL(url); return null; }
+}
+// Quanto do armazenamento do aparelho já foi usado (fotos + tudo mais
+// desse site). Usado só pra avisar o usuário antes de travar de vez.
+async function estimarArmazenamento(){
+  try{
+    if(!navigator.storage || !navigator.storage.estimate) return null;
+    const {usage, quota} = await navigator.storage.estimate();
+    return {usoMB: (usage||0)/1048576, cotaMB: (quota||0)/1048576, pct: quota ? (usage/quota) : 0};
+  }catch(e){ return null; }
+}
+
 /* ================= calculo ================= */
 function calcular(){
   const r = dados.rascunho;
@@ -717,12 +838,24 @@ function dataBR(iso){
   return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : iso;
 }
 
-function desenhar(){
+let desenhoToken = 0;
+async function desenhar(){
+  // Evita que um desenho antigo (ainda esperando a foto carregar) sobrescreva
+  // um mais novo se o usuário digitar/trocar a foto rápido demais.
+  const meuToken = ++desenhoToken;
   const c = calcular();
   const n = dados.negocio;
   const r = dados.rascunho;
   const cor = n.cor || "#0E7A5F";
   const larg = L - PAD*2;
+  const ALT_FOTO = 300;
+  // Só reserva espaço na imagem se a foto realmente carregar — assim uma
+  // foto corrompida/apagada não deixa um buraco em branco no orçamento.
+  const imgFoto = r.fotoId ? await carregarImagemFoto(r.fotoId) : null;
+  if(meuToken !== desenhoToken){
+    if(imgFoto && imgFoto._url) URL.revokeObjectURL(imgFoto._url);
+    return c;
+  }
 
   const med = document.createElement("canvas").getContext("2d");
 
@@ -744,6 +877,7 @@ function desenhar(){
   h += 40 + 36;                   // cliente
   if(r.evento || r.data) h += 34;
   h += 30;
+  if(imgFoto) h += 34 + ALT_FOTO + 24;  // rotulo + foto de referencia
   h += 34;                        // rotulo itens
   itens.forEach(i=>{ h += i.linhas.length*40 + (i.qtd>1?28:0) + 22; });
   h += 26;
@@ -804,6 +938,28 @@ function desenhar(){
     x.fillText(linha, PAD, y);
   }
   y += 30;
+
+  /* foto de referencia do cliente */
+  if(imgFoto){
+    x.fillStyle = "#7C838F"; x.font = F(700,20);
+    x.fillText("REFERÊNCIA DO CLIENTE", PAD, y);
+    y += 34;
+    const bx = PAD, by = y, bw = larg, bh = ALT_FOTO;
+    x.save();
+    x.beginPath();
+    if(x.roundRect) x.roundRect(bx,by,bw,bh,16); else x.rect(bx,by,bw,bh);
+    x.clip();
+    const escala = Math.max(bw/imgFoto.width, bh/imgFoto.height);
+    const iw = imgFoto.width*escala, ih = imgFoto.height*escala;
+    x.drawImage(imgFoto, bx+(bw-iw)/2, by+(bh-ih)/2, iw, ih);
+    x.restore();
+    x.strokeStyle = "#E4E6EB"; x.lineWidth = 2;
+    x.beginPath();
+    if(x.roundRect) x.roundRect(bx,by,bw,bh,16); else x.rect(bx,by,bw,bh);
+    x.stroke();
+    if(imgFoto._url) URL.revokeObjectURL(imgFoto._url);
+    y += ALT_FOTO + 24;
+  }
 
   /* itens */
   x.fillStyle = "#7C838F"; x.font = F(700,20);
@@ -920,10 +1076,14 @@ function registrar(){
     id:uid(), criadoEm:new Date().toISOString(),
     cliente:r.cliente||"Sem nome", evento:r.evento||"", dataEvento:r.data||"",
     total:c.total, custo:c.custo, lucro:c.lucro, status:"enviado",
-    itens:c.linhas.map(i=>({nome:i.nome,qtd:i.qtd,total:i.total}))
+    itens:c.linhas.map(i=>({nome:i.nome,qtd:i.qtd,total:i.total})),
+    fotoId: r.fotoId || null
   };
   dados.orcamentos.unshift(o);
-  if(dados.orcamentos.length>200) dados.orcamentos.length = 200;
+  if(dados.orcamentos.length>200){
+    dados.orcamentos.slice(200).forEach(d=>{ if(d.fotoId) apagarFoto(d.fotoId); });
+    dados.orcamentos.length = 200;
+  }
   salvar();
   return o;
 }
@@ -940,14 +1100,14 @@ function foneLimpo(f){
   if(d.length<=11) d = "55"+d;
   return d;
 }
-function pronto(){
+async function pronto(){
   const c = calcular();
   if(!c.linhas.length){ avisar("Escolha pelo menos um item."); return null; }
-  desenhar();
+  await desenhar();
   return c;
 }
-function abrirImagem(){
-  if(!pronto()) return;
+async function abrirImagem(){
+  if(!(await pronto())) return;
   $("#img-final").src = $("#previa").toDataURL("image/png");
   $("#img-dica").textContent = ehIOS
     ? "Segure o dedo na imagem e toque em Salvar em Fotos."
@@ -985,10 +1145,10 @@ async function compartilhar(){
 }
 
 $("#enviar").addEventListener("click",async ()=>{
-  if(!pronto()) return;
+  if(!(await pronto())) return;
   const ok = await compartilhar();
   if(ok){ registrar(); renderHistorico(); avisar("Registrado no histórico."); }
-  else{ marcarRestrito(); abrirImagem(); }
+  else{ marcarRestrito(); await abrirImagem(); }
 });
 $("#img-share").addEventListener("click",async ()=>{
   const ok = await compartilhar();
@@ -1023,7 +1183,8 @@ $("#copiar").addEventListener("click",async ()=>{
 });
 $("#limpar-rascunho").addEventListener("click",()=>{
   if(!confirm("Limpar este orçamento e começar outro?")) return;
-  dados.rascunho = {cliente:"",fone:"",evento:"",data:"",itens:[],entrega:0,desconto:0,obs:dados.rascunho.obs||""};
+  if(dados.rascunho.fotoId) apagarFoto(dados.rascunho.fotoId);
+  dados.rascunho = {cliente:"",fone:"",evento:"",data:"",itens:[],entrega:0,desconto:0,obs:dados.rascunho.obs||"",fotoId:null};
   salvar(); preencherRascunho(); renderSeletor(); atualizar();
   avisar("Pronto para o próximo.");
 });
@@ -1039,7 +1200,40 @@ function preencherRascunho(){
   $("#o-desconto").value = txt(r.desconto,2);
   $("#o-obs").value = r.obs||"";
   rotuloZap();
+  mostrarPreviewFoto(null);
+  if(r.fotoId){
+    lerFoto(r.fotoId).then(blob=>{ if(blob && dados.rascunho.fotoId===r.fotoId) mostrarPreviewFoto(blob); });
+  }
 }
+function mostrarPreviewFoto(blob){
+  const cx = $("#ref-preview");
+  if(!blob){ cx.classList.add("oculto"); return; }
+  $("#ref-img").src = URL.createObjectURL(blob);
+  cx.classList.remove("oculto");
+}
+$("#btn-foto").addEventListener("click",()=>$("#o-foto").click());
+$("#o-foto").addEventListener("change",async e=>{
+  const file = e.target.files[0];
+  e.target.value = "";
+  if(!file) return;
+  try{
+    const blob = await comprimirImagem(file);
+    const id = dados.rascunho.fotoId || uid();
+    await salvarFoto(id, blob);
+    dados.rascunho.fotoId = id;
+    salvar();
+    mostrarPreviewFoto(blob);
+    agendar();
+  }catch(err){
+    avisar("Não deu pra processar essa foto — tenta outra.");
+  }
+});
+$("#ref-remover").addEventListener("click",async ()=>{
+  const id = dados.rascunho.fotoId;
+  dados.rascunho.fotoId = null;
+  salvar(); mostrarPreviewFoto(null); agendar();
+  if(id) apagarFoto(id);
+});
 function rotuloZap(){
   const n = (dados.rascunho.cliente||"").trim().split(/\s+/)[0];
   $("#zap-txt").textContent = n ? "Abrir conversa com "+n : "Abrir conversa do cliente";
@@ -1151,6 +1345,7 @@ $("#c-apagar").addEventListener("click",()=>{
 /* ================= historico ================= */
 const ROTULO = {enviado:["Enviado","s-env"],fechado:["Fechado","s-fec"],perdido:["Perdido","s-per"]};
 function renderHistorico(){
+  atualizarArmazenamento();
   const lim = Date.now() - 30*24*60*60*1000;
   const recentes = dados.orcamentos.filter(o=>new Date(o.criadoEm).getTime()>=lim);
   const fechados = recentes.filter(o=>o.status==="fechado");
@@ -1184,6 +1379,37 @@ function renderHistorico(){
     box.appendChild(el);
   });
 }
+// Fotos ficam à parte (IndexedDB) — aqui só avisa quando vale a pena
+// liberar espaço apagando as mais antigas. O orçamento em si nunca é
+// tocado, só a foto anexada a ele; o catálogo nem entra nessa conta.
+async function atualizarArmazenamento(){
+  const comFoto = dados.orcamentos.filter(o=>o.fotoId);
+  const bloco = $("#bloco-armaz");
+  if(!comFoto.length){ bloco.classList.add("oculto"); return; }
+  bloco.classList.remove("oculto");
+
+  const est = await estimarArmazenamento();
+  const limite60 = Date.now() - 60*24*60*60*1000;
+  const antigos = comFoto.filter(o=>new Date(o.criadoEm).getTime()<limite60);
+
+  let texto = comFoto.length+" orçamento"+(comFoto.length>1?"s":"")+" com foto salvo"+(comFoto.length>1?"s":"")+" neste aparelho";
+  if(est) texto += " · aprox. "+txt(est.usoMB,0)+" MB usados";
+  $("#armaz-texto").textContent = texto+".";
+
+  const btn = $("#armaz-liberar");
+  if(antigos.length){
+    btn.textContent = "Apagar "+antigos.length+" foto"+(antigos.length>1?"s":"")+" de orçamentos com mais de 60 dias";
+    btn.classList.remove("oculto");
+    btn.onclick = async ()=>{
+      if(!confirm("Isso apaga só as fotos desses orçamentos antigos — o orçamento e os números continuam no histórico. Continuar?")) return;
+      for(const o of antigos){ await apagarFoto(o.fotoId); o.fotoId = null; }
+      salvar(); atualizarArmazenamento();
+      avisar("Espaço liberado.");
+    };
+  }else{
+    btn.classList.add("oculto");
+  }
+}
 
 let histAberto = null;
 function abrirHist(id){
@@ -1211,8 +1437,10 @@ $("#hist-enviado").addEventListener("click",()=>mudarStatus("enviado"));
 $("#hist-fechar").addEventListener("click",fecharHist);
 $("#hist-remover").addEventListener("click",()=>{
   if(!confirm("Remover este orçamento do histórico? Não dá para desfazer.")) return;
+  const alvo = dados.orcamentos.find(x=>x.id===histAberto);
   dados.orcamentos = dados.orcamentos.filter(x=>x.id!==histAberto);
-  salvar(); fecharHist(); renderHistorico();
+  salvar(); fecharHist(); renderHistorico(); atualizarArmazenamento();
+  if(alvo && alvo.fotoId) apagarFoto(alvo.fotoId);
   avisar("Removido do histórico.");
 });
 
