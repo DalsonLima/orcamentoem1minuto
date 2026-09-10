@@ -114,6 +114,12 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
 .ref-preview img{display:block;width:140px;height:140px;object-fit:cover;border-radius:var(--r2);border:1px solid var(--traco)}
 .ref-x{position:absolute;top:-8px;right:-8px;width:26px;height:26px;border-radius:50%;background:var(--perigo);color:#fff;border:2px solid var(--superficie);font-size:13px;line-height:1;cursor:pointer}
 .armaz-linha{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.lic-gate{position:fixed;inset:0;z-index:500;background:var(--folha);display:flex;align-items:center;justify-content:center;padding:24px}
+.lic-card{max-width:340px;width:100%;text-align:center}
+.lic-card h1{font-size:22px;font-weight:800;margin:0 0 6px;letter-spacing:-.03em}
+.lic-card p{color:var(--tinta-3);font-size:13.5px;margin:0 0 18px}
+.lic-card input{margin-bottom:12px;text-align:center}
+.lic-erro{color:var(--perigo) !important;margin-top:12px !important}
 .ic{appearance:none;border:0;background:var(--folha);color:var(--tinta-2);cursor:pointer;width:38px;height:38px;border-radius:10px;flex:none;display:grid;place-items:center;font-size:18px;line-height:1}
 .ic svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
@@ -241,6 +247,15 @@ input[type=color]::-webkit-color-swatch{border:none;border-radius:50%}
 </style>
 </head>
 <body>
+<div class="lic-gate oculto" id="lic-gate">
+  <div class="lic-card">
+    <h1>Acesso</h1>
+    <p>Digite o e-mail cadastrado pra liberar o app.</p>
+    <input type="email" id="lic-email" placeholder="seuemail@exemplo.com" autocomplete="email" inputmode="email">
+    <button class="b" id="lic-entrar" type="button">Entrar</button>
+    <p class="lic-erro oculto" id="lic-erro"></p>
+  </div>
+</div>
 <div class="app">
 
 <!-- ================= ORCAMENTO ================= -->
@@ -1649,7 +1664,60 @@ function checarMarca(){
   $("#faixa-marca").classList.toggle("oculto", !vazio);
 }
 
-/* ================= inicio ================= */
+/* ================= licenca (checagem simples do lado do cliente) =================
+   Isso não é proteção de verdade — é só uma trava simples. Quem souber abrir
+   o inspecionar código do navegador consegue contornar. Serve pra dar
+   trabalho a quem tenta usar sem pagar, não pra impedir de fato. */
+const CHAVE_LICENCA = "orc1min.licenca";
+const URL_LICENCAS = "licencas.json";        // mesma pasta do index.html
+const VALIDADE_LICENCA_DIAS = 7;
+
+function licencaSalva(){
+  try{ return JSON.parse(localStorage.getItem(CHAVE_LICENCA) || "null"); }catch(e){ return null; }
+}
+function marcarLicencaValida(email){
+  try{ localStorage.setItem(CHAVE_LICENCA, JSON.stringify({email, validadoEm: Date.now()})); }catch(e){}
+}
+async function emailAutorizado(email){
+  const resp = await fetch(URL_LICENCAS, {cache:"no-store"});
+  if(!resp.ok) throw new Error("config indisponível");
+  const cfg = await resp.json();
+  const alvo = (email||"").trim().toLowerCase();
+  return (cfg.autorizados||[]).some(e => (e||"").trim().toLowerCase() === alvo);
+}
+function mostrarGate(mensagemErro){
+  $("#lic-gate").classList.remove("oculto");
+  const erro = $("#lic-erro");
+  if(mensagemErro){ erro.textContent = mensagemErro; erro.classList.remove("oculto"); }
+  else erro.classList.add("oculto");
+}
+function esconderGate(){ $("#lic-gate").classList.add("oculto"); }
+
+$("#lic-entrar").addEventListener("click", async ()=>{
+  const email = $("#lic-email").value.trim();
+  if(!email){ mostrarGate("Digite um e-mail."); return; }
+  $("#lic-entrar").disabled = true;
+  try{
+    const ok = await emailAutorizado(email);
+    if(ok){ marcarLicencaValida(email); esconderGate(); arrancarApp(); }
+    else mostrarGate("Esse e-mail não está liberado. Confirma com quem vendeu o acesso.");
+  }catch(e){
+    mostrarGate("Não consegui checar agora — confirma sua internet e tenta de novo.");
+  }
+  $("#lic-entrar").disabled = false;
+});
+$("#lic-email").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#lic-entrar").click(); });
+
+function arrancarApp(){
+  dados = carregar();
+  iniciar();
+  instrucoes();
+  faixa();
+  mostrarRestrito();
+  renderDiag();
+  registrarSW();
+  salvar();
+}
 function iniciar(){
   preencherRascunho();
   preencherNegocio();
@@ -1659,14 +1727,28 @@ function iniciar(){
   checarMarca();
   atualizar();
 }
-dados = carregar();
-iniciar();
-instrucoes();
-faixa();
-mostrarRestrito();
-renderDiag();
-registrarSW();
-salvar();
+
+(async function verificarAcesso(){
+  const salvo = licencaSalva();
+  const dentroDoPrazo = salvo && (Date.now()-salvo.validadoEm) < VALIDADE_LICENCA_DIAS*24*60*60*1000;
+
+  if(dentroDoPrazo){ arrancarApp(); return; }   // ainda válido, nem precisa de rede
+
+  if(salvo){
+    // já teve acesso, só venceu o prazo de revalidação: libera na hora e
+    // confere em segundo plano — nunca tranca por falta de internet, só se
+    // a lista realmente não tiver mais esse e-mail.
+    arrancarApp();
+    try{
+      const ok = await emailAutorizado(salvo.email);
+      if(ok) marcarLicencaValida(salvo.email);
+      else{ localStorage.removeItem(CHAVE_LICENCA); mostrarGate("Seu acesso venceu. Digite o e-mail cadastrado de novo."); }
+    }catch(e){ /* offline: segue funcionando com o acesso anterior */ }
+    return;
+  }
+
+  mostrarGate();  // primeira vez neste aparelho
+})();
 </script>
 </body>
 </html>
